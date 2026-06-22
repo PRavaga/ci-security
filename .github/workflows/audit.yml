@@ -1,0 +1,65 @@
+name: Deep audit (reusable)
+
+# Whole-repo deep security audit (Opus). For PRIVATE repos only — run it on the
+# pre-release PR so build/publish can depend on it, or via workflow_dispatch.
+#
+# It REFUSES to run on a public repo, because anything CI emits there (artifacts,
+# summary, logs) is public and would disclose findings. For public repos, run
+# `node scripts/full-audit.mjs` locally instead and file an advisory by hand.
+#
+# Consumers vendor scripts/full-audit.mjs (copied from PRavaga/ci-security) and call:
+#
+#   jobs:
+#     audit:
+#       uses: PRavaga/ci-security/.github/workflows/audit.yml@<sha-or-vX.Y.Z>
+#       secrets:
+#         CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
+
+on:
+  workflow_call:
+    inputs:
+      model:
+        type: string
+        default: claude-opus-4-8
+    secrets:
+      CLAUDE_API_KEY:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  deep-audit:
+    name: Deep security audit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Disclosure guard — refuse on non-private repos
+        if: github.repository_visibility != 'private'
+        run: |
+          echo "::error::Deep audit must not run in CI on a ${{ github.repository_visibility }} repo — its report would be public. Run 'node scripts/full-audit.mjs' locally instead."
+          exit 1
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20
+      - name: Run deep audit (gates on HIGH/CRITICAL)
+        env:
+          CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
+          AUDIT_MODEL: ${{ inputs.model }}
+        run: node scripts/full-audit.mjs
+      - name: Upload report (private artifact)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: security-audit
+          path: |
+            audit-report.md
+            audit-findings.json
+            audit-coverage.json
+          if-no-files-found: ignore
+      - name: Job summary
+        if: always()
+        run: |
+          { echo "## Security audit"; cat audit-report.md 2>/dev/null || echo "(no report produced)"; } >> "$GITHUB_STEP_SUMMARY"

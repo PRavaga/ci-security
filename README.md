@@ -81,6 +81,42 @@ Inputs you can pass on the caller:
 - `exclude-directories` — defaults to `build,node_modules,.context,dist`.
 - `max-changed-lines` — defaults to `5000`; PRs bigger than this skip the AI review to bound cost.
 
+## Deep audit (release tier)
+
+The PR review only sees the diff. For releases there's a deeper, whole-repo pass
+(`scripts/full-audit.mjs`) that reads the full supply-chain surface (source +
+workflows + manifests + Dockerfiles + scripts, not just `src`), chunks instead of
+truncating, writes a coverage manifest, and redacts anything secret-shaped from
+its report. It exits non-zero on a HIGH/CRITICAL so it can gate a release.
+
+Because a deep report names exploitable issues, **where it runs depends on repo
+visibility:**
+
+- **Private repos:** call `audit.yml` on the pre-release PR so build/publish can
+  depend on it. The report lands as a *private* artifact + job summary.
+  ```yaml
+  jobs:
+    audit:
+      uses: PRavaga/ci-security/.github/workflows/audit.yml@v1.1.0
+      secrets:
+        CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
+  ```
+  Vendor `scripts/full-audit.mjs` too. `audit.yml` **refuses to run on a public
+  repo** (its output would be public).
+
+- **Public repos:** run it **locally**, never in CI:
+  ```bash
+  CLAUDE_API_KEY=sk-ant-... node scripts/full-audit.mjs
+  # or just a coverage + cost estimate, no API call:
+  AUDIT_DRY_RUN=1 node scripts/full-audit.mjs
+  ```
+  Read `audit-report.md`; if it finds something real, file a **draft GitHub
+  security advisory** by hand (private until you publish the fix). Don't open a
+  public issue.
+
+Don't automate advisory creation — it needs a privileged PAT in CI, which isn't
+worth it for an infrequent, deliberate disclosure step.
+
 ## Worth knowing
 
 - **Trusted PRs only.** The review action runs Claude Code with shell access over the PR's content and isn't hardened against prompt injection. It's gated to non-fork PRs (forks get no secret), but a malicious *internal* branch still reaches it — protect who can push branches.

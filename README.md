@@ -24,10 +24,12 @@ permissions:
   pull-requests: write
 jobs:
   security:
-    uses: PRavaga/ci-security/.github/workflows/security.yml@v1.0.0
+    uses: PRavaga/ci-security/.github/workflows/security.yml@v1.0.1
     secrets:
       CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
 ```
+
+For the pattern guard, also **vendor the runner** — copy `scripts/security-guard.mjs` from this repo (at the tag you pinned) into your repo, alongside your `security-guard.config.json`. The CI runs your vendored copy; nothing is fetched from the network at run time. Re-copy it when you bump the pinned version. Without a vendored runner (and with a config present) the guard fails loudly so you don't get a silent no-op.
 
 That's the whole hookup. The next PR gets the guard, plus the AI review once a key is set.
 

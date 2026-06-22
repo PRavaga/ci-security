@@ -9,22 +9,23 @@ name: Security (reusable)
 #       secrets:
 #         CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
 #
-# Do NOT use `secrets: inherit` (over-shares every secret, and does not pass
-# cross-owner) and do NOT pin a moving tag like @v1.
+# Layer 1 (guard) runs the consumer's VENDORED scripts/security-guard.mjs (copied
+# from this repo) — no code is fetched from the network at run time. Layer 2
+# (ai-review) runs Claude over the PR diff, self-skipping without a key, on forks,
+# or on oversized PRs.
+#
+# Do NOT use `secrets: inherit` (over-shares every secret; doesn't pass
+# cross-owner) and do NOT pin a moving tag.
 
 on:
   workflow_call:
     inputs:
-      # Cheap model for the high-frequency PR tier. The deep pre-release audit
-      # uses Opus separately.
       claude-model:
         type: string
         default: claude-sonnet-4-6
       exclude-directories:
         type: string
         default: build,node_modules,.context,dist
-      # Skip the AI review (cost guard) when a PR is larger than this many
-      # changed lines. Raise per-repo if you have legitimately large PRs.
       max-changed-lines:
         type: number
         default: 5000
@@ -35,7 +36,6 @@ on:
 permissions:
   contents: read
 
-# Supersede in-flight runs for the same PR so only the latest commit is reviewed.
 concurrency:
   group: security-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -47,19 +47,20 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Checkout repo under review
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - name: Checkout guard runner (pinned to this reusable workflow's commit)
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        with:
-          repository: PRavaga/ci-security
-          ref: ${{ github.job_workflow_sha }}
-          path: .ci-security
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 20
-      - name: Run guard (skips if repo has no security-guard.config.json)
-        run: node .ci-security/scripts/security-guard.mjs
+      - name: Run vendored guard
+        run: |
+          if [ -f scripts/security-guard.mjs ]; then
+            node scripts/security-guard.mjs
+          elif [ -f security-guard.config.json ]; then
+            echo "::error::security-guard.config.json present but scripts/security-guard.mjs is not vendored. Copy it from PRavaga/ci-security."
+            exit 1
+          else
+            echo "No vendored guard in this repo — skipping Layer 1."
+          fi
 
   ai-key-present:
     name: Check AI key
@@ -83,25 +84,36 @@ jobs:
   ai-review:
     name: AI security review
     needs: ai-key-present
-    # PR-only (diff-based), key present, and under the size cap. Forked PRs have
-    # no secret so they skip. Large PRs skip to bound cost.
-    if: >-
-      github.event_name == 'pull_request' &&
-      needs.ai-key-present.outputs.present == 'true' &&
-      (github.event.pull_request.additions + github.event.pull_request.deletions) <= fromJSON(inputs.max-changed-lines)
+    if: github.event_name == 'pull_request' && needs.ai-key-present.outputs.present == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
       pull-requests: write
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Cost guard (skip oversized PRs)
+        id: size
+        env:
+          ADD: ${{ github.event.pull_request.additions }}
+          DEL: ${{ github.event.pull_request.deletions }}
+          CAP: ${{ inputs.max-changed-lines }}
+        run: |
+          CHANGED=$(( ${ADD:-0} + ${DEL:-0} ))
+          if [ "$CHANGED" -le "${CAP:-5000}" ]; then
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::PR changes $CHANGED lines (> $CAP) — AI review skipped to bound cost."
+          fi
+      - if: steps.size.outputs.proceed == 'true'
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 2
-      # NOTE: third-party action, SHA-pinned. It runs Claude Code with shell on
-      # PR content; only run it on trusted (non-fork) PRs — enforced by the
-      # secret gate above. Bump the SHA deliberately via Dependabot.
-      - uses: anthropics/claude-code-security-review@0c6a49f1fa56a1d472575da86a94dbc1edb78eda # main @ 2026-06-22
+      # Third-party action, SHA-pinned. Runs Claude Code with shell on PR content
+      # and is not prompt-injection hardened — only reached on non-fork PRs (gated
+      # by the secret). Bump the SHA deliberately via Dependabot.
+      - if: steps.size.outputs.proceed == 'true'
+        uses: anthropics/claude-code-security-review@0c6a49f1fa56a1d472575da86a94dbc1edb78eda # main @ 2026-06-22
         with:
           claude-api-key: ${{ secrets.CLAUDE_API_KEY }}
           claude-model: ${{ inputs.claude-model }}

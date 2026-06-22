@@ -1,0 +1,5 @@
+# All security-policy code requires owner review.
+# (Enforced when branch protection requires CODEOWNER review.)
+* @PRavaga
+/.github/workflows/ @PRavaga
+/scripts/ @PRavaga

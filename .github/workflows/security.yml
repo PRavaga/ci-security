@@ -1,52 +1,61 @@
 name: Security (reusable)
 
-# Reusable security workflow. Consumers call it from their own workflow:
+# Reusable security workflow. Consumers pin an IMMUTABLE ref and pass only the
+# one secret they want shared:
 #
 #   jobs:
 #     security:
-#       uses: PRavaga/ci-security/.github/workflows/security.yml@v1
-#       secrets: inherit
+#       uses: PRavaga/ci-security/.github/workflows/security.yml@<full-sha-or-vX.Y.Z>
+#       secrets:
+#         CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
 #
-# Layer 1 (guard): runs this repo's canonical runner against the caller's code,
-#   reading the caller's security-guard.config.json (skips if absent). No secret.
-# Layer 2 (ai-review): Claude reviews the PR diff. Self-skips unless a
-#   CLAUDE_API_KEY secret is present, and only on pull_request events.
+# Do NOT use `secrets: inherit` (over-shares every secret, and does not pass
+# cross-owner) and do NOT pin a moving tag like @v1.
 
 on:
   workflow_call:
     inputs:
+      # Cheap model for the high-frequency PR tier. The deep pre-release audit
+      # uses Opus separately.
       claude-model:
         type: string
-        default: claude-opus-4-8
+        default: claude-sonnet-4-6
       exclude-directories:
         type: string
-        default: build,node_modules,.context
-      runner-ref:
-        description: Git ref of PRavaga/ci-security to pull the guard runner from.
-        type: string
-        default: v1
+        default: build,node_modules,.context,dist
+      # Skip the AI review (cost guard) when a PR is larger than this many
+      # changed lines. Raise per-repo if you have legitimately large PRs.
+      max-changed-lines:
+        type: number
+        default: 5000
     secrets:
       CLAUDE_API_KEY:
         required: false
 
 permissions:
   contents: read
-  pull-requests: write
+
+# Supersede in-flight runs for the same PR so only the latest commit is reviewed.
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   guard:
     name: Pattern guard
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Checkout repo under review
-        uses: actions/checkout@v4
-      - name: Checkout guard runner
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Checkout guard runner (pinned to this reusable workflow's commit)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: PRavaga/ci-security
-          ref: ${{ inputs.runner-ref }}
+          ref: ${{ github.job_workflow_sha }}
           path: .ci-security
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 20
       - name: Run guard (skips if repo has no security-guard.config.json)
@@ -55,6 +64,8 @@ jobs:
   ai-key-present:
     name: Check AI key
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       present: ${{ steps.check.outputs.present }}
     steps:
@@ -66,22 +77,34 @@ jobs:
             echo "present=true" >> "$GITHUB_OUTPUT"
           else
             echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::CLAUDE_API_KEY not set — AI security review skipped."
+            echo "::notice::CLAUDE_API_KEY not set — AI review skipped."
           fi
 
   ai-review:
     name: AI security review
     needs: ai-key-present
-    if: ${{ github.event_name == 'pull_request' && needs.ai-key-present.outputs.present == 'true' }}
+    # PR-only (diff-based), key present, and under the size cap. Forked PRs have
+    # no secret so they skip. Large PRs skip to bound cost.
+    if: >-
+      github.event_name == 'pull_request' &&
+      needs.ai-key-present.outputs.present == 'true' &&
+      (github.event.pull_request.additions + github.event.pull_request.deletions) <= fromJSON(inputs.max-changed-lines)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 2
-      - uses: anthropics/claude-code-security-review@main
+      # NOTE: third-party action, SHA-pinned. It runs Claude Code with shell on
+      # PR content; only run it on trusted (non-fork) PRs — enforced by the
+      # secret gate above. Bump the SHA deliberately via Dependabot.
+      - uses: anthropics/claude-code-security-review@0c6a49f1fa56a1d472575da86a94dbc1edb78eda # main @ 2026-06-22
         with:
           claude-api-key: ${{ secrets.CLAUDE_API_KEY }}
           claude-model: ${{ inputs.claude-model }}
           comment-pr: true
+          run-every-commit: true
           exclude-directories: ${{ inputs.exclude-directories }}

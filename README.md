@@ -97,12 +97,15 @@ visibility:**
   ```yaml
   jobs:
     audit:
-      uses: PRavaga/ci-security/.github/workflows/audit.yml@v1.1.0
+      uses: PRavaga/ci-security/.github/workflows/audit.yml@v1.1.1
       secrets:
         CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
   ```
-  Vendor `scripts/full-audit.mjs` too. `audit.yml` **refuses to run on a public
-  repo** (its output would be public).
+  No vendoring needed: CI runs the engine from a **pinned, immutable** ci-security
+  checkout (the key-bearing step never executes your repo's own files — your repo
+  is only *data* to it). It **refuses to run on a public repo** (output would be
+  public). Cost is capped (`AUDIT_MAX_COST_USD`, `AUDIT_MAX_CHUNKS`); a partial run
+  reports as incomplete, never as a pass.
 
 - **Public repos:** run it **locally**, never in CI:
   ```bash

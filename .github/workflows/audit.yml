@@ -1,17 +1,16 @@
 name: Deep audit (reusable)
 
-# Whole-repo deep security audit (Opus). For PRIVATE repos only — run it on the
-# pre-release PR so build/publish can depend on it, or via workflow_dispatch.
+# Whole-repo deep security audit (Opus). PRIVATE repos only — it REFUSES on any
+# non-private repo (public CI output would disclose findings; run the engine
+# locally for those and file an advisory by hand).
 #
-# It REFUSES to run on a public repo, because anything CI emits there (artifacts,
-# summary, logs) is public and would disclose findings. For public repos, run
-# `node scripts/full-audit.mjs` locally instead and file an advisory by hand.
-#
-# Consumers vendor scripts/full-audit.mjs (copied from PRavaga/ci-security) and call:
+# Trust model: the engine is checked out from a PINNED, immutable ci-security ref
+# (the trusted control plane) and runs against the caller repo as untrusted DATA.
+# The caller's own files never execute in the key-bearing step.
 #
 #   jobs:
 #     audit:
-#       uses: PRavaga/ci-security/.github/workflows/audit.yml@<sha-or-vX.Y.Z>
+#       uses: PRavaga/ci-security/.github/workflows/audit.yml@v1.1.1
 #       secrets:
 #         CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
 
@@ -32,6 +31,7 @@ jobs:
   deep-audit:
     name: Deep security audit
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     permissions:
       contents: read
     steps:
@@ -40,15 +40,25 @@ jobs:
         run: |
           echo "::error::Deep audit must not run in CI on a ${{ github.repository_visibility }} repo — its report would be public. Run 'node scripts/full-audit.mjs' locally instead."
           exit 1
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Checkout target repo (untrusted data)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          path: target
+      - name: Checkout trusted engine (pinned, immutable)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          repository: PRavaga/ci-security
+          ref: v1.1.1
+          path: engine
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 20
-      - name: Run deep audit (gates on HIGH/CRITICAL)
+      - name: Run deep audit (trusted engine over target data; gates on HIGH/CRITICAL)
         env:
           CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
           AUDIT_MODEL: ${{ inputs.model }}
-        run: node scripts/full-audit.mjs
+          AUDIT_TARGET: ${{ github.workspace }}/target
+        run: node engine/scripts/full-audit.mjs
       - name: Upload report (private artifact)
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

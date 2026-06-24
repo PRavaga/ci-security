@@ -86,8 +86,9 @@ Inputs you can pass on the caller:
 The PR review only sees the diff. For releases there's a deeper, whole-repo pass
 (`scripts/full-audit.mjs`) that reads the full supply-chain surface (source +
 workflows + manifests + Dockerfiles + scripts, not just `src`), chunks instead of
-truncating, writes a coverage manifest, and redacts anything secret-shaped from
-its report. It exits non-zero on a HIGH/CRITICAL so it can gate a release.
+truncating, and writes a coverage manifest. It scans for secrets and **redacts
+them from the source before sending** (and from the report), flagging each as a
+deterministic finding. It exits non-zero on a HIGH/CRITICAL so it can gate a release.
 
 Because a deep report names exploitable issues, **where it runs depends on repo
 visibility:**
@@ -97,7 +98,7 @@ visibility:**
   ```yaml
   jobs:
     audit:
-      uses: PRavaga/ci-security/.github/workflows/audit.yml@v1.1.1
+      uses: PRavaga/ci-security/.github/workflows/audit.yml@v1.1.2
       secrets:
         CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
   ```

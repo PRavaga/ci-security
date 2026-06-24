@@ -9,7 +9,7 @@
 //
 // Usage:
 //   CLAUDE_API_KEY=sk-ant-... AUDIT_TARGET=/path/to/repo node scripts/full-audit.mjs
-//   AUDIT_DRY_RUN=1 AUDIT_TARGET=. node scripts/full-audit.mjs   # coverage+cost, no API
+//   AUDIT_DRY_RUN=1 AUDIT_TARGET=. node scripts/full-audit.mjs   # coverage+cost+secret scan, no API
 //
 // Env: CLAUDE_API_KEY|ANTHROPIC_API_KEY, AUDIT_TARGET (default cwd),
 //      AUDIT_MODEL (claude-opus-4-8), AUDIT_MAX_COST_USD (default 5),
@@ -19,9 +19,9 @@
 // Exit: 1 = completed with HIGH/CRITICAL (gate); 2 = incomplete/over-budget/error;
 //       0 = completed clean.
 //
-// NOTE ON EGRESS: every audited file is sent to the Anthropic API. Only run on
-// repos whose source you may transmit to a third party; confirm your org's data
-// retention / ZDR terms.
+// EGRESS: every audited file is sent to the Anthropic API — AFTER local secret
+// redaction (secrets never leave). Still, only run on repos whose source you may
+// transmit to a third party; confirm your org's data retention / ZDR terms.
 //
 import { readFileSync, readdirSync, lstatSync, writeFileSync } from 'node:fs';
 import { join, extname, relative, basename } from 'node:path';
@@ -38,6 +38,33 @@ const MAX_OUT = 16000;
 const CHUNK_TOKEN_BUDGET = 600_000; // ~1M context less prompt+output; one call for almost any repo
 const approxTokens = (s) => Math.ceil(s.length / 3.5);
 const die = (code, msg) => { console.error(msg); process.exit(code); };
+
+// ---- Secret patterns: used BOTH to redact source before egress and to redact
+// outputs. Each has a mask(match, ...groups) that preserves needed structure.
+const SECRET_PATTERNS = [
+	{ label: 'anthropic-key', re: /sk-ant-[A-Za-z0-9_-]{12,}/g, mask: () => 'sk-ant-[REDACTED]' },
+	{ label: 'aws-key', re: /A(KIA|SIA)[0-9A-Z]{16}/g, mask: (_m, g) => `A${g}[REDACTED]` },
+	{ label: 'github-token', re: /gh[posru]_[A-Za-z0-9]{20,}/g, mask: () => 'gh_[REDACTED]' },
+	{ label: 'github-pat', re: /github_pat_[A-Za-z0-9_]{20,}/g, mask: () => 'github_pat_[REDACTED]' },
+	{ label: 'slack-token', re: /xox[baprs]-[A-Za-z0-9-]{10,}/g, mask: () => 'xox-[REDACTED]' },
+	{ label: 'stripe-key', re: /(sk|rk)_(live|test)_[A-Za-z0-9]{16,}/g, mask: (_m, a, b) => `${a}_${b}_[REDACTED]` },
+	{ label: 'google-key', re: /AIza[0-9A-Za-z_-]{30,}/g, mask: () => 'AIza[REDACTED]' },
+	{ label: 'jwt', re: /eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, mask: () => 'jwt.[REDACTED]' },
+	{ label: 'url-credentials', re: /([a-z][a-z0-9+.-]*:\/\/)[^\s/@:]+:[^\s/@]+@/gi, mask: (_m, scheme) => `${scheme}[REDACTED]@` },
+	{ label: 'private-key', re: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, mask: () => '[REDACTED PRIVATE KEY]' },
+];
+const redact = (s) => SECRET_PATTERNS.reduce((acc, p) => acc.replace(p.re, p.mask), String(s));
+function scanSecrets(text, file) {
+	let redacted = text;
+	const hits = [];
+	for (const p of SECRET_PATTERNS) {
+		redacted = redacted.replace(p.re, (...args) => {
+			hits.push({ label: p.label, file, prefix: String(args[0]).slice(0, 6) });
+			return p.mask(...args);
+		});
+	}
+	return { redacted, hits };
+}
 
 // ---- Inventory: classify EVERY traversed file (included or excluded+reason) ---
 const INCLUDE_EXT = new Set(['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.json', '.yml', '.yaml', '.sh', '.bash', '.sql', '.prisma']);
@@ -68,7 +95,8 @@ function walk(dir, acc) {
 		const c = classify(name);
 		if (!c.include) { acc.push({ rel: relative(TARGET, p), include: false, reason: c.reason }); continue; }
 		if (st.size > MAX_FILE_BYTES) { acc.push({ rel: relative(TARGET, p), include: false, reason: `>${MAX_FILE_BYTES}B` }); continue; }
-		acc.push({ rel: relative(TARGET, p), include: true, text: readFileSync(p, 'utf8'), tokens: approxTokens(readFileSync(p, 'utf8')) });
+		const text = readFileSync(p, 'utf8');
+		acc.push({ rel: relative(TARGET, p), include: true, text, tokens: approxTokens(text) });
 	}
 	return acc;
 }
@@ -76,9 +104,26 @@ function walk(dir, acc) {
 const classified = walk(TARGET, []);
 const included = classified.filter((f) => f.include);
 const excluded = classified.filter((f) => !f.include).map((f) => ({ file: f.rel, reason: f.reason }));
-const totalTokens = included.reduce((n, f) => n + f.tokens, 0);
 
-// Chunk only if forced (budget is near the model's context limit).
+// ---- Pre-egress secret scan: redact source IN PLACE before it leaves, and
+// record each hit as a deterministic HIGH finding (independent of the model).
+const preFindings = [];
+for (const f of included) {
+	const { redacted, hits } = scanSecrets(f.text, f.rel);
+	f.text = redacted;
+	for (const h of hits) {
+		preFindings.push({
+			severity: 'HIGH',
+			title: `Hardcoded secret (${h.label})`,
+			file: h.file,
+			issue: `A ${h.label} appears in source (prefix ${h.prefix}…). It was redacted before the file was sent to the API.`,
+			impact: 'A committed credential is exposed to anyone with repo (or git-history) access.',
+			fix: 'Move it to a secret store / env var, rotate the leaked value, and purge it from git history.',
+		});
+	}
+}
+
+const totalTokens = included.reduce((n, f) => n + f.tokens, 0);
 const chunks = [[]];
 let acc = 0;
 for (const f of included) {
@@ -86,23 +131,22 @@ for (const f of included) {
 	chunks[chunks.length - 1].push(f); acc += f.tokens;
 }
 
-// Worst-case cost from max_tokens (not an optimistic guess).
 const estCost = (totalTokens / 1e6) * 5 + (chunks.length * MAX_OUT / 1e6) * 25;
 const coverage = {
 	target: basename(TARGET), model: MODEL,
 	files_included: included.length, files_excluded: excluded.length,
 	approx_input_tokens: totalTokens, chunks: chunks.length,
 	worst_case_cost_usd: Number(estCost.toFixed(2)),
+	secrets_found: preFindings.length,
 	included: included.map((f) => ({ file: f.rel, tokens: f.tokens })),
 	excluded,
 };
 writeFileSync(join(OUT, 'audit-coverage.json'), JSON.stringify(coverage, null, 2));
-console.log(`Coverage: ${included.length} files in / ${excluded.length} out, ~${totalTokens} tokens, ${chunks.length} chunk(s).`);
-console.log(`Worst-case Opus cost: ~$${estCost.toFixed(2)}. (Every included file is sent to the Anthropic API.)`);
+console.log(`Coverage: ${included.length} files in / ${excluded.length} out, ~${totalTokens} tokens, ${chunks.length} chunk(s). Secrets found: ${preFindings.length}.`);
+console.log(`Worst-case Opus cost: ~$${estCost.toFixed(2)}. (Included files are sent to the Anthropic API after local secret redaction.)`);
 
 if (DRY) die(0, 'Dry run — wrote audit-coverage.json, no API call.');
 
-// Preflight cost ceiling.
 if (!OVERRIDE && (chunks.length > MAX_CHUNKS || estCost > MAX_COST)) {
 	writeFileSync(join(OUT, 'audit-report.md'), `# Security audit — REFUSED (too large)\n\nWould need ${chunks.length} chunk(s) / ~$${estCost.toFixed(2)} (caps: ${MAX_CHUNKS} chunks, $${MAX_COST}). Set AUDIT_OVERRIDE=1 to proceed.\n`);
 	die(2, `Refusing: ${chunks.length} chunks / ~$${estCost.toFixed(2)} exceeds caps. Set AUDIT_OVERRIDE=1 to override.`);
@@ -168,7 +212,7 @@ async function callAPI(user, attempt = 0) {
 	} finally { clearTimeout(t); }
 }
 
-const summary = [], findings = [], chunkStatus = [];
+const summary = [], findings = [...preFindings], chunkStatus = [];
 for (let i = 0; i < chunks.length; i++) {
 	const body = chunks[i].map((f) => `=== FILE: ${f.file} ===\n${f.text}`).join('\n\n');
 	const user = `${chunks.length > 1 ? `Chunk ${i + 1}/${chunks.length}. ` : ''}<repository>\n${body}\n</repository>`;
@@ -179,20 +223,7 @@ for (let i = 0; i < chunks.length; i++) {
 }
 
 // ---- Sanitize + redact (both outputs) ---------------------------------------
-const redact = (s) => String(s)
-	.replace(/sk-ant-[A-Za-z0-9_-]{12,}/g, 'sk-ant-[REDACTED]')
-	.replace(/A(KIA|SIA)[0-9A-Z]{16}/g, 'A$1[REDACTED]')
-	.replace(/gh[posru]_[A-Za-z0-9]{20,}/g, 'gh_[REDACTED]')
-	.replace(/github_pat_[A-Za-z0-9_]{20,}/g, 'github_pat_[REDACTED]')
-	.replace(/xox[baprs]-[A-Za-z0-9-]{10,}/g, 'xox-[REDACTED]')
-	.replace(/(sk|rk)_(live|test)_[A-Za-z0-9]{16,}/g, '$1_[REDACTED]')
-	.replace(/AIza[0-9A-Za-z_-]{30,}/g, 'AIza[REDACTED]')
-	.replace(/eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, 'jwt.[REDACTED]')
-	.replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s/@:]+:[^\s/@]+@/gi, '$1[REDACTED]@')
-	.replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, '[REDACTED PRIVATE KEY]');
-// neutralize markdown links/images/HTML from model-controlled fields
 const mdSafe = (s) => redact(s).replace(/[<>]/g, (c) => (c === '<' ? '&lt;' : '&gt;')).replace(/!?\[/g, '(').replace(/\]\(/g, ') (');
-
 const order = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3 };
 findings.sort((a, b) => (order[a.severity] ?? 9) - (order[b.severity] ?? 9));
 const counts = findings.reduce((m, f) => ((m[f.severity] = (m[f.severity] || 0) + 1), m), {});
@@ -211,5 +242,5 @@ writeFileSync(join(OUT, 'audit-report.md'), md);
 writeFileSync(join(OUT, 'audit-findings.json'), redact(JSON.stringify({ status, counts, chunkStatus, findings }, null, 2)));
 console.log(`Audit ${status}: ${['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'].map((s) => `${counts[s] || 0} ${s}`).join(', ')}.`);
 
-if (failedChunks) process.exit(2);                         // partial never reads as a pass
+if (failedChunks) process.exit(2);
 process.exit((counts.CRITICAL || 0) + (counts.HIGH || 0) ? 1 : 0);

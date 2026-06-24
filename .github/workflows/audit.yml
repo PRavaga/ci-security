@@ -10,7 +10,7 @@ name: Deep audit (reusable)
 #
 #   jobs:
 #     audit:
-#       uses: PRavaga/ci-security/.github/workflows/audit.yml@v1.1.1
+#       uses: PRavaga/ci-security/.github/workflows/audit.yml@v1.1.2
 #       secrets:
 #         CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
 
@@ -48,7 +48,7 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: PRavaga/ci-security
-          ref: v1.1.1
+          ref: v1.1.2
           path: engine
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:

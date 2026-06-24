@@ -138,6 +138,7 @@ on:
 permissions:
   contents: read
   security-events: write
+  actions: read
 jobs:
   codeql:
     uses: PRavaga/ci-security/.github/workflows/codeql.yml@v1.2.0

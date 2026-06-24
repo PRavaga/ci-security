@@ -1,0 +1,37 @@
+name: CodeQL (reusable)
+
+# Deterministic SAST via GitHub CodeQL. Free on public repos; private repos need
+# GitHub Advanced Security. No API key. Results land in the repo's Security tab
+# (code scanning alerts), not in public output.
+#
+# Consumers call it:
+#   jobs:
+#     codeql:
+#       uses: PRavaga/ci-security/.github/workflows/codeql.yml@v1.2.0
+
+on:
+  workflow_call:
+    inputs:
+      languages:
+        type: string
+        default: javascript-typescript
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  analyze:
+    name: CodeQL analyze
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: github/codeql-action/init@b0c4fd77f6c559021d78430ec4d0d169ae74a4eb # v3
+        with:
+          languages: ${{ inputs.languages }}
+      # JS/TS is interpreted — no autobuild step needed.
+      - uses: github/codeql-action/analyze@b0c4fd77f6c559021d78430ec4d0d169ae74a4eb # v3

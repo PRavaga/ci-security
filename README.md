@@ -121,6 +121,28 @@ visibility:**
 Don't automate advisory creation — it needs a privileged PAT in CI, which isn't
 worth it for an infrequent, deliberate disclosure step.
 
+## Deterministic SAST (CodeQL)
+
+The guard catches *known* footguns and the AI review is probabilistic — neither is
+real static analysis. `codeql.yml` adds GitHub CodeQL as a deterministic layer.
+Free on public repos; private repos need GitHub Advanced Security. Results go to
+the repo's Security tab (not public output), no API key. Add a caller:
+
+```yaml
+# .github/workflows/codeql.yml
+name: CodeQL
+on:
+  pull_request: { branches: [main] }
+  push: { branches: [main] }
+  schedule: [{ cron: "24 7 * * 1" }]   # weekly full scan
+permissions:
+  contents: read
+  security-events: write
+jobs:
+  codeql:
+    uses: PRavaga/ci-security/.github/workflows/codeql.yml@v1.2.0
+```
+
 ## Worth knowing
 
 - **Trusted PRs only.** The review action runs Claude Code with shell access over the PR's content and isn't hardened against prompt injection. It's gated to non-fork PRs (forks get no secret), but a malicious *internal* branch still reaches it — protect who can push branches.

@@ -41,16 +41,16 @@ jobs:
           echo "::error::Deep audit must not run in CI on a ${{ github.repository_visibility }} repo — its report would be public. Run 'node scripts/full-audit.mjs' locally instead."
           exit 1
       - name: Checkout target repo (untrusted data)
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           path: target
       - name: Checkout trusted engine (pinned, immutable)
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: PRavaga/ci-security
           ref: v1.3.0
           path: engine
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: 22
       - name: Run deep audit (trusted engine over target data; gates on HIGH/CRITICAL)
@@ -61,7 +61,7 @@ jobs:
         run: node engine/scripts/full-audit.mjs
       - name: Upload report (private artifact)
         if: always()
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: security-audit
           path: |
